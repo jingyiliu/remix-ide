@@ -2,14 +2,9 @@
 var yo = require('yo-yo')
 var javascriptserialize = require('javascript-serialize')
 var jsbeautify = require('js-beautify')
-var ethers = require('ethers')
 var type = require('component-type')
-var vm = require('vm')
 var EventManager = require('../../lib/events')
-var Web3 = require('web3')
-var swarmgw = require('swarmgw')()
 
-var CommandInterpreterAPI = require('../../lib/cmdInterpreterAPI')
 var AutoCompletePopup = require('../ui/auto-complete-popup')
 var TxLogger = require('../../app/ui/txLogger')
 
@@ -18,6 +13,7 @@ var csjs = require('csjs-inject')
 var css = require('./styles/terminal-styles')
 import { Plugin } from '@remixproject/engine'
 import * as packageJson from '../../../package.json'
+import webworkify from 'webworkify'
 
 var packageV = require('../../../package.json')
 
@@ -42,6 +38,14 @@ class Terminal extends Plugin {
     var self = this
     self.event = new EventManager()
     self.executionContext = opts.executionContext
+
+    /*
+    self.sandbox.postMessage({
+      cmd: 'init',
+      data: self.executionContext
+    })
+    */
+
     self._api = api
     self._opts = opts
     self.data = {
@@ -52,7 +56,6 @@ class Terminal extends Plugin {
     }
     self._view = { el: null, bar: null, input: null, term: null, journal: null, cli: null }
     self._components = {}
-    self._components.cmdInterpreter = new CommandInterpreterAPI(this, null, self.executionContext)
     self._components.autoCompletePopup = new AutoCompletePopup(self._opts)
     self._components.autoCompletePopup.event.register('handleSelect', function (input) {
       let textList = self._view.input.innerText.split(' ')
@@ -91,9 +94,6 @@ class Terminal extends Plugin {
     self.registerFilter('warn', basicFilter)
     self.registerFilter('error', basicFilter)
     self.registerFilter('script', basicFilter)
-
-    self._jsSandboxContext = {}
-    self._jsSandboxRegistered = {}
 
     // TODO move this to the application start. Put it in mainView.
     // We should have a HostPlugin which add the terminal.
@@ -663,47 +663,24 @@ class Terminal extends Plugin {
     }
     return self.commands[name]
   }
-  _shell (script, scopedCommands, done) { // default shell
+  async _shell (script, scopedCommands, done) { // default shell
     if (script.indexOf('remix:') === 0) {
       return done(null, 'This type of command has been deprecated and is not functionning anymore. Please run remix.help() to list available commands.')
     }
-    var self = this
-    var context = domTerminalFeatures(self, scopedCommands, self.executionContext)
     try {
-      var cmds = vm.createContext(Object.assign(self._jsSandboxContext, context, self._jsSandboxRegistered))
-      var result = vm.runInContext(script, cmds)
-      self._jsSandboxContext = Object.assign(cmds, context)
-      done(null, result)
+      if (!this.sandbox) {
+        this.sandbox = webworkify(require('../../lib/codeExecutionWorker').default)
+        this.sandbox.addEventListener('message', function (msg) {
+          this.commands[msg.cmd].apply(this.commands, msg.data)
+        })
+      }
+      this.sandbox.postMessage({
+        cmd: 'execute',
+        script: script
+      })
+      done()
     } catch (error) {
       done(error.message)
-    }
-  }
-}
-
-function domTerminalFeatures (self, scopedCommands, executionContext) {
-  return {
-    swarmgw,
-    ethers,
-    remix: self._components.cmdInterpreter,
-    web3: new Web3(executionContext.web3().currentProvider),
-    console: {
-      log: function () { scopedCommands.log.apply(scopedCommands, arguments) },
-      info: function () { scopedCommands.info.apply(scopedCommands, arguments) },
-      warn: function () { scopedCommands.warn.apply(scopedCommands, arguments) },
-      error: function () { scopedCommands.error.apply(scopedCommands, arguments) }
-    },
-    setTimeout: (fn, time) => {
-      return setTimeout(() => { self._shell('(' + fn.toString() + ')()', scopedCommands, () => {}) }, time)
-    },
-    setInterval: (fn, time) => {
-      return setInterval(() => { self._shell('(' + fn.toString() + ')()', scopedCommands, () => {}) }, time)
-    },
-    clearTimeout: clearTimeout,
-    clearInterval: clearInterval,
-    exports: {
-      register: (key, obj) => { self._jsSandboxRegistered[key] = obj },
-      remove: (key) => { delete self._jsSandboxRegistered[key] },
-      clear: () => { self._jsSandboxRegistered = {} }
     }
   }
 }
